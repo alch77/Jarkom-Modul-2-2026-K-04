@@ -1090,3 +1090,71 @@ curl -s -w "\nHTTP %{http_code}\n" -u 'prabs:pakar_pinter_jadi_gob***' http://ww
 - Path `/admin` dilayani langsung oleh `penny` dan tidak diteruskan ke area vault.
 
 ![langkah 12.2](assets/soal12_auth.png)
+
+
+
+13. Setiap entitas dari luar harus memanggil gerbang The Mesh menggunakan nama kanoniknya, yaitu nama resmi yang menjadi identitas publik layanan. Oleh karena itu, akses yang menggunakan IP atau nama node gerbang secara langsung akan dialihkan (redirect) ke nama kanonik. Akses ke IP `penny` (`192.213.5.2`) maupun `penny.k04.com` dialihkan secara **permanen (301)** ke `www.k04.com`, sedangkan akses ke IP `abbey` (`192.213.4.2`) maupun `abbey.k04.com` dialihkan secara **sementara (302)** ke `static.k04.com`.
+
+Perbedaan kedua jenis redirect:
+- **301 Moved Permanently**: memberi tahu pengunjung (dan browser) bahwa alamat tersebut sudah pindah secara permanen, sehingga browser akan langsung menuju alamat baru pada akses berikutnya.
+- **302 Found / Moved Temporarily**: memberi tahu bahwa pengalihan hanya bersifat sementara, sehingga alamat lama tetap dianggap berlaku.
+
+Web server dapat membedakan tujuan akses dengan melihat header `Host`, yaitu nama yang diketik oleh pengunjung. Jika `Host` berisi nama kanonik (`www.k04.com` atau `static.k04.com`), permintaan dilayani seperti biasa. Jika berisi IP atau nama node, permintaan dialihkan.
+
+**Konfigurasi di Penny (Redirect 301)**
+
+Pada `penny` dibuat virtual host baru khusus untuk pengalihan. Nama file diawali `000-` agar dimuat paling awal oleh Apache, sehingga virtual host ini menjadi *default* yang juga menangkap akses melalui alamat IP:
+```bash
+cat <<'EOF' > /etc/apache2/sites-available/000-canonical.conf
+<VirtualHost *:80>
+    ServerName penny.k04.com
+    ServerAlias 192.213.5.2 k04.com
+
+    Redirect permanent / http://www.k04.com/
+</VirtualHost>
+EOF
+
+a2ensite 000-canonical
+apache2ctl configtest && service apache2 restart
+```
+Keterangan: `ServerAlias` berisi IP `penny` serta domain apex `k04.com`, sehingga semua akses selain `www.k04.com` diarahkan ke nama kanonik. `Redirect permanent` menghasilkan kode status 301.
+
+**Konfigurasi di Abbey (Redirect 302)**
+
+Pada `abbey` dibuat server block Nginx baru yang menangkap akses ke `abbey.k04.com` dan IP `192.213.4.2`, lalu mengembalikan kode 302 menuju `static.k04.com`:
+```bash
+cat <<'EOF' > /etc/nginx/sites-available/canonical
+server {
+    listen 80;
+    server_name abbey.k04.com 192.213.4.2;
+
+    return 302 http://static.k04.com$request_uri;
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/canonical /etc/nginx/sites-enabled/canonical
+nginx -t && service nginx restart
+```
+Keterangan: variabel `$request_uri` mempertahankan path yang diakses. Contohnya, akses ke `abbey.k04.com/orion` akan dialihkan ke `static.k04.com/orion`.
+
+**Validasi**
+
+Untuk membuktikan bahwa pengalihan berjalan sesuai ketentuan, dilakukan pengujian dari node klien `alpha` menggunakan `curl -I` untuk melihat kode status dan tujuan pengalihan (header `Location`). Selain itu, dipastikan pula bahwa nama kanonik `www.k04.com` dan `static.k04.com` tetap dapat diakses secara normal.
+
+**Cara Validasi:**
+```bash
+for url in http://192.213.5.2/ http://penny.k04.com/ http://192.213.4.2/ http://abbey.k04.com/; do
+  echo "=== $url ==="
+  curl -s -I "$url" | grep -iE "^HTTP|^Location"
+done
+echo "=== Cek www & static tetap normal ==="
+curl -s -o /dev/null -w "www    -> HTTP %{http_code}\n" http://www.k04.com/whoami.txt
+curl -s -o /dev/null -w "static -> HTTP %{http_code}\n" http://static.k04.com/headers
+```
+
+**Hasil yang diharapkan:** Akses ke IP dan domain `penny` menghasilkan `HTTP/1.1 301 Moved Permanently` dengan `Location: http://www.k04.com/`, sedangkan akses ke IP dan domain `abbey` menghasilkan `HTTP/1.1 302 Moved Temporarily` dengan `Location: http://static.k04.com/`. Hal ini mengonfirmasi bahwa:
+- `penny` berhasil mengalihkan akses non-kanonik secara permanen (301) ke `www.k04.com`.
+- `abbey` berhasil mengalihkan akses non-kanonik secara sementara (302) ke `static.k04.com`.
+- Akses melalui nama kanonik `www.k04.com` dan `static.k04.com` tetap berjalan normal (`HTTP 200`) dan tidak ikut dialihkan.
+
+![langkah 13.3](assets/langkah_13.3.png)

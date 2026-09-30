@@ -1158,3 +1158,79 @@ curl -s -o /dev/null -w "static -> HTTP %{http_code}\n" http://static.k04.com/he
 - Akses melalui nama kanonik `www.k04.com` dan `static.k04.com` tetap berjalan normal (`HTTP 200`) dan tidak ikut dialihkan.
 
 ![langkah 13.3](assets/langkah_13.3.png)
+
+
+
+14. Di dalam The Mesh, rekam jejak tidak boleh dipalsukan oleh sistem. Sebelum konfigurasi ini diterapkan, `access.log` pada setiap server backend hanya mencatat alamat IP milik gerbang (`penny` atau `abbey`), karena dari sudut pandang backend, gerbang itulah yang mengirimkan permintaan. Akibatnya, IP asli pengunjung tidak tercatat. Pada tahap ini, setiap server backend di area vault dan area core dikonfigurasi agar membaca header `X-Real-IP` yang dikirimkan oleh gerbang (sudah diatur pada soal 11), sehingga `access.log` mencatat alamat IP asli pengunjung.
+
+Untuk mencegah pemalsuan, backend hanya mempercayai header `X-Real-IP` apabila permintaan berasal dari gerbang resmi, yaitu `penny` (`192.213.5.2`) untuk area vault dan `abbey` (`192.213.4.2`) untuk area core.
+
+**Konfigurasi di Obladi dan Desmond (Area Vault - Apache)**
+
+Pada Apache digunakan modul `remoteip` yang bertugas mengganti IP pengirim dengan IP yang tertulis pada header `X-Real-IP`. Selain itu, format log `combined` diubah dari `%h` (IP yang terhubung langsung) menjadi `%a` (IP asli hasil pembacaan `remoteip`):
+```bash
+a2enmod remoteip
+
+cat <<'EOF' > /etc/apache2/conf-available/realip.conf
+RemoteIPHeader X-Real-IP
+RemoteIPInternalProxy 192.213.5.2
+LogFormat "%a %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" combined
+EOF
+
+a2enconf realip
+apache2ctl configtest && service apache2 restart
+```
+
+Penjelasan konfigurasi:
+- `RemoteIPHeader X-Real-IP`: menentukan header yang berisi IP asli pengunjung.
+- `RemoteIPInternalProxy 192.213.5.2`: hanya mempercayai header tersebut apabila permintaan datang dari `penny`.
+- `LogFormat ... combined`: format log diperbarui menggunakan `%a` agar yang tercatat adalah IP asli pengunjung.
+
+**Konfigurasi di Oblada dan Molly (Area Core - Nginx)**
+
+Pada Nginx digunakan fitur `real_ip`. Konfigurasi diletakkan di folder `/etc/nginx/conf.d/` yang otomatis dibaca oleh Nginx. Format log bawaan Nginx sudah menggunakan variabel `$remote_addr`, dan nilai variabel ini otomatis berubah menjadi IP asli setelah `real_ip` aktif, sehingga format log tidak perlu diubah:
+```bash
+cat <<'EOF' > /etc/nginx/conf.d/realip.conf
+set_real_ip_from 192.213.4.2;
+real_ip_header   X-Real-IP;
+EOF
+
+nginx -t && service nginx restart
+```
+
+Penjelasan konfigurasi:
+- `set_real_ip_from 192.213.4.2`: hanya mempercayai header dari `abbey`.
+- `real_ip_header X-Real-IP`: mengambil IP asli pengunjung dari header `X-Real-IP`.
+
+**Validasi**
+
+Untuk membuktikan bahwa `access.log` pada backend mencatat IP asli pengunjung, dikirimkan beberapa permintaan dari node klien `alpha` (`192.213.2.2`) melalui kedua gerbang, kemudian log pada backend diperiksa.
+
+**Cara Validasi:** Mengirimkan permintaan dari `alpha`:
+```bash
+for i in 1 2 3 4; do
+  curl -s -o /dev/null http://www.k04.com/whoami.txt
+  curl -s -o /dev/null http://static.k04.com/headers
+done
+```
+
+Kemudian memeriksa log di `obladi` (area vault):
+```bash
+tail -n 6 /var/log/apache2/access.log
+```
+
+**Hasil yang diharapkan:** Baris log lama (sebelum konfigurasi) mencatat IP `penny` (`192.213.5.2`), sedangkan baris log baru (setelah konfigurasi) mencatat IP asli `alpha` (`192.213.2.2`).
+
+![langkah 14.4](assets/langkah_14.4.png)
+
+Lalu memeriksa log di `oblada` (area core):
+```bash
+tail -n 6 /var/log/nginx/access.log
+```
+
+**Hasil yang diharapkan:** Baris log lama mencatat IP `abbey` (`192.213.4.2`), sedangkan baris log baru mencatat IP asli `alpha` (`192.213.2.2`). Hal ini mengonfirmasi bahwa:
+- Server backend di area vault dan area core berhasil membaca header `X-Real-IP` yang diteruskan oleh gerbang.
+- `access.log` mencatat alamat IP asli pengunjung, bukan IP milik `penny` ataupun `abbey`.
+- Perbedaan baris log sebelum dan sesudah konfigurasi menjadi bukti langsung keberhasilan perubahan ini.
+
+![langkah 14.5](assets/langkah_14.5.png)

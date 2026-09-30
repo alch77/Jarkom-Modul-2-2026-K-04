@@ -1328,3 +1328,56 @@ curl -s http://static.k04.com/orion/
 - Kedua jalur dilayani langsung oleh gerbang masing-masing dan tidak diteruskan ke area vault maupun core.
 
 ![langkah 15.3](assets/langkah_15.3.png)
+
+
+16. Ketahanan gerbang The Mesh harus diuji untuk menghadapi bombardir permintaan. Pada tahap ini, node klien `alpha` melakukan *stress test* (uji beban) menggunakan **ApacheBench (`ab`)** terhadap kedua gerbang, yaitu `www.k04.com` (`penny`) dan `static.k04.com` (`abbey`). Setiap gerbang dikirimi **250 permintaan** dengan **tingkat konkurensi 10**, artinya 10 permintaan dikirim secara bersamaan dalam setiap waktu.
+
+**Konfigurasi di Alpha**
+
+Langkah pertama adalah menginstal paket `apache2-utils` yang berisi program `ab`:
+```bash
+apt update
+apt install apache2-utils -y
+```
+
+Selanjutnya dijalankan benchmark terhadap kedua gerbang. Hasil lengkap disimpan ke file agar dapat ditinjau ulang:
+```bash
+for target in www.k04.com static.k04.com; do
+    ab -n 250 -c 10 "http://$target/" > /root/ab_$target.txt 2>&1
+done
+```
+Keterangan parameter:
+- `-n 250`: jumlah total permintaan yang dikirim.
+- `-c 10`: jumlah permintaan yang dikirim secara bersamaan (konkurensi).
+
+**Validasi**
+
+Untuk menampilkan rangkuman hasil benchmark, diambil baris-baris penting dari file hasil menggunakan `grep`.
+
+**Cara Validasi:**
+```bash
+grep -E "Server Software|Server Hostname|Concurrency Level|Complete requests|Failed requests|Exceptions|Non-2xx|Requests per second|Time per request|Transfer rate" /root/ab_www.k04.com.txt
+grep -E "Server Software|Server Hostname|Concurrency Level|Complete requests|Failed requests|Exceptions|Non-2xx|Requests per second|Time per request|Transfer rate" /root/ab_static.k04.com.txt
+```
+
+**Rangkuman hasil benchmark:**
+
+| Parameter | `www.k04.com` (penny → vault) | `static.k04.com` (abbey → core) |
+| :--- | :---: | :---: |
+| Server Software | Apache/2.4.68 | nginx |
+| Concurrency Level | 10 | 10 |
+| Complete requests | 250 | 250 |
+| Failed requests | 0 | 125 (Length) |
+| Requests per second | 2394.68 | 2537.02 |
+| Time per request (mean) | 4.176 ms | 3.942 ms |
+| Time per request (across all concurrent) | 0.418 ms | 0.394 ms |
+| Transfer rate | 2282.43 KB/s | 548.78 KB/s |
+
+![langkah 16.1](assets/langkah_16.1.png)
+
+![langkah 16.2](assets/langkah_16.2.png)
+
+**Hasil yang diharapkan:** Seluruh 250 permintaan pada kedua gerbang berhasil diselesaikan (`Complete requests: 250`) tanpa adanya respons error (tidak terdapat baris `Non-2xx responses`). Hal ini mengonfirmasi bahwa:
+- Kedua gerbang (`penny` dan `abbey`) mampu menangani 250 permintaan dengan 10 permintaan bersamaan tanpa kegagalan koneksi.
+- Nilai `Failed requests: 125` pada `static.k04.com` **bukan merupakan kegagalan sebenarnya**. Rinciannya menunjukkan `Length: 125`, yaitu ApacheBench menandai respons yang panjang isinya berbeda dari respons pertama. Hal ini terjadi karena `abbey` membagi permintaan secara bergantian ke `oblada` dan `molly`, yang halamannya memiliki panjang teks berbeda. Jumlah 125 (tepat setengah dari 250) justru membuktikan bahwa load balancing berjalan merata 50:50.
+- Nilai `Connect`, `Receive`, dan `Exceptions` bernilai 0, menandakan tidak ada koneksi yang benar-benar gagal.

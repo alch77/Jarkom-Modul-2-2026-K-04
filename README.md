@@ -1381,3 +1381,62 @@ grep -E "Server Software|Server Hostname|Concurrency Level|Complete requests|Fai
 - Kedua gerbang (`penny` dan `abbey`) mampu menangani 250 permintaan dengan 10 permintaan bersamaan tanpa kegagalan koneksi.
 - Nilai `Failed requests: 125` pada `static.k04.com` **bukan merupakan kegagalan sebenarnya**. Rinciannya menunjukkan `Length: 125`, yaitu ApacheBench menandai respons yang panjang isinya berbeda dari respons pertama. Hal ini terjadi karena `abbey` membagi permintaan secara bergantian ke `oblada` dan `molly`, yang halamannya memiliki panjang teks berbeda. Jumlah 125 (tepat setengah dari 250) justru membuktikan bahwa load balancing berjalan merata 50:50.
 - Nilai `Connect`, `Receive`, dan `Exceptions` bernilai 0, menandakan tidak ada koneksi yang benar-benar gagal.
+
+17. Setiap klien di sayap kiri (`alpha`, `beta`, `gamma`) dan sayap kanan (`delta`, `epsilon`) diberikan identitas tambahan berupa **TXT record** pada DNS. TXT record adalah jenis record DNS yang berisi teks bebas (bukan alamat IP) dan biasanya digunakan untuk keterangan atau verifikasi domain. Ketika DNS menerima query TXT untuk domain milik klien (misalnya `alpha.k04.com`), sistem harus mengembalikan teks berupa nama hostname klien tersebut (misalnya `"alpha"`).
+
+**Konfigurasi di Prab (DNS Master)**
+
+TXT record ditambahkan ke file zona `/etc/bind/k04/k04.com` untuk kelima klien. Pengecekan `grep` digunakan agar record tidak tertulis ganda apabila script dijalankan lebih dari sekali:
+```bash
+ZONE_FILE=/etc/bind/k04/k04.com
+
+for h in alpha beta gamma delta epsilon; do
+    grep -qE "^$h[[:space:]]+IN[[:space:]]+TXT" "$ZONE_FILE" || \
+        printf '%-12s IN      TXT     "%s"\n' "$h" "$h" >> "$ZONE_FILE"
+done
+```
+
+Baris yang ditambahkan ke file zona:
+```
+alpha        IN      TXT     "alpha"
+beta         IN      TXT     "beta"
+gamma        IN      TXT     "gamma"
+delta        IN      TXT     "delta"
+epsilon      IN      TXT     "epsilon"
+```
+
+Setelah file zona diubah, **nilai serial SOA wajib dinaikkan**. Server slave (`tedd`) hanya akan menyalin ulang zona apabila serial pada master lebih besar dari serial yang dimilikinya:
+```bash
+OLD=$(grep -m1 -oE '[0-9]{10}' "$ZONE_FILE")
+NEW=$((OLD + 1))
+sed -i "s/$OLD/$NEW/" "$ZONE_FILE"
+echo "Serial SOA: $OLD -> $NEW"
+
+named-checkzone k04.com "$ZONE_FILE" && service bind9 restart
+```
+Keterangan: `named-checkzone` digunakan untuk memeriksa kebenaran penulisan file zona sebelum BIND9 direstart. Serial naik dari `2026092801` menjadi `2026092802`.
+
+![langkah 17.1](assets/langkah_17.1.png)
+
+**Validasi**
+
+Untuk membuktikan bahwa TXT record berhasil ditambahkan dan tersinkronisasi ke server slave, dilakukan query TXT dari node klien `alpha` secara langsung ke `prab` (`192.213.1.2`) dan `tedd` (`192.213.1.3`), serta membandingkan serial SOA keduanya.
+
+**Cara Validasi:**
+```bash
+for h in alpha beta gamma delta epsilon; do
+  echo "$h.k04.com -> prab: $(dig @192.213.1.2 $h.k04.com TXT +short) | tedd: $(dig @192.213.1.3 $h.k04.com TXT +short)"
+done
+echo "Serial prab: $(dig @192.213.1.2 k04.com SOA +short | awk '{print $3}')"
+echo "Serial tedd: $(dig @192.213.1.3 k04.com SOA +short | awk '{print $3}')"
+```
+
+**Hasil yang diharapkan:** Query TXT untuk setiap klien mengembalikan nama hostname masing-masing (`"alpha"`, `"beta"`, `"gamma"`, `"delta"`, `"epsilon"`) baik dari `prab` maupun `tedd`, dan serial SOA keduanya bernilai sama (`2026092802`). Hal ini mengonfirmasi bahwa:
+- TXT record untuk kelima klien berhasil ditambahkan pada zona `k04.com`.
+- Setiap query TXT mengembalikan teks berupa nama hostname klien yang bersangkutan.
+- Kenaikan serial SOA berhasil memicu zone transfer, sehingga `tedd` memiliki salinan zona terbaru yang identik dengan `prab`.
+
+![langkah 17.2](assets/langkah_17.2.png)
+
+
+

@@ -1027,3 +1027,66 @@ tail -n 2 /var/log/apache2/header.log
 - Header `Host` asli (`www.k04.com`) dan IP asli pengunjung (`192.213.2.2`) berhasil diteruskan oleh `penny` ke area vault.
 
 ![langkah 11.6](assets/soal_11_headerlog.png)
+
+
+
+12. Di dalam gerbang `penny` terdapat ruang khusus yang menyimpan dokumen rahasia sindikat. Agar tidak sembarang pengunjung dapat masuk, path `/admin` pada `penny` dilindungi menggunakan **Basic Authentication**. Setiap pengunjung yang mengakses `/admin` wajib memasukkan username `prabs` dan password `pakar_pinter_jadi_gob***`. Pengunjung tanpa kredensial atau dengan kredensial yang salah akan ditolak.
+
+**Konfigurasi di Penny**
+
+Langkah pertama adalah menginstal paket `apache2-utils` yang berisi perintah `htpasswd`, lalu membuat file password untuk user `prabs`. Password disimpan dalam bentuk terenkripsi (hash), bukan teks biasa:
+```bash
+apt install apache2-utils -y
+htpasswd -cb /etc/apache2/.htpasswd prabs 'pakar_pinter_jadi_gob***'
+```
+Keterangan: opsi `-c` untuk membuat file baru, dan `-b` agar password dapat dituliskan langsung pada perintah. Password ditulis di dalam tanda kutip satu karena mengandung karakter `*`.
+
+Selanjutnya dibuat halaman isi dari ruang rahasia tersebut:
+```bash
+mkdir -p /var/www/admin
+echo "<h1>Dokumen Rahasia Sindikat - Penny</h1>" > /var/www/admin/index.html
+```
+
+Kemudian ditambahkan konfigurasi `/admin` ke folder `penny-extra` yang sudah disiapkan pada soal 11 (folder ini otomatis dimuat oleh virtual host `www.k04.com`):
+```bash
+cat <<'EOF' > /etc/apache2/penny-extra/admin.conf
+ProxyPass /admin !
+Alias /admin /var/www/admin
+
+<Directory /var/www/admin>
+    AuthType Basic
+    AuthName "Ruang Rahasia Penny"
+    AuthUserFile /etc/apache2/.htpasswd
+    Require valid-user
+</Directory>
+EOF
+
+apache2ctl configtest && service apache2 restart
+```
+
+Penjelasan konfigurasi:
+- `ProxyPass /admin !`: tanda `!` berarti path `/admin` **dikecualikan** dari reverse proxy, sehingga tidak diteruskan ke area vault dan dilayani langsung oleh `penny`.
+- `Alias /admin /var/www/admin`: path `/admin` diarahkan ke folder `/var/www/admin` milik `penny`.
+- `AuthType Basic` dan `AuthUserFile`: mengaktifkan Basic Authentication menggunakan file password yang telah dibuat.
+- `Require valid-user`: hanya user yang terdaftar dengan password yang benar yang diizinkan masuk.
+
+**Validasi**
+
+Untuk membuktikan bahwa perlindungan `/admin` berjalan dengan benar, dilakukan pengujian dari node klien `alpha` dengan tiga skenario: tanpa login, dengan password salah, dan dengan kredensial yang benar.
+
+**Cara Validasi:**
+```bash
+echo "=== Tanpa login ==="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://www.k04.com/admin/
+echo "=== Password salah ==="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" -u 'prabs:salah' http://www.k04.com/admin/
+echo "=== Login benar ==="
+curl -s -w "\nHTTP %{http_code}\n" -u 'prabs:pakar_pinter_jadi_gob***' http://www.k04.com/admin/
+```
+
+**Hasil yang diharapkan:** Akses tanpa login dan dengan password salah mendapatkan kode `HTTP 401` (Unauthorized), sedangkan akses dengan kredensial yang benar mendapatkan kode `HTTP 200` (OK) beserta isi halaman rahasia. Hal ini mengonfirmasi bahwa:
+- Path `/admin` berhasil dilindungi dan menolak pengunjung tanpa kredensial yang valid.
+- Hanya user `prabs` dengan password yang benar yang dapat mengakses dokumen rahasia di `penny`.
+- Path `/admin` dilayani langsung oleh `penny` dan tidak diteruskan ke area vault.
+
+![langkah 12.2](assets/soal12_auth.png)

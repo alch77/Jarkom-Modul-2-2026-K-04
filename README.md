@@ -844,3 +844,192 @@ Hasil yang Diharapkan:
 - Perintah `curl` ke `/profil` berhasil diterjemahkan oleh aturan rewrite Nginx ke file `profil.php` tanpa menampilkan ekstensi file, membuktikan bahwa arsitektur web dinamis area core berjalan dengan sukses dan responsif di seluruh jaringan The Mesh.
 
 ![soal 10](assets/soal_10.png)
+
+
+
+
+
+
+
+
+
+
+
+
+11. Agar area penyimpanan data The Mesh tidak diakses secara langsung oleh pengunjung, `rootkit` menempatkan dua gerbang penyaring sebagai perantara. Node `penny` (menggunakan Apache) bertugas sebagai reverse proxy menuju area vault (`obladi` dan `desmond`), sedangkan node `abbey` (menggunakan Nginx) bertugas sebagai reverse proxy menuju area core (`oblada` dan `molly`). Selain meneruskan permintaan, kedua gerbang ini juga membagi beban secara bergantian (load balancing) ke setiap backend dan meneruskan identitas asli pengunjung melalui header `Host` dan `X-Real-IP`.
+
+Secara sederhana, alur lalu lintasnya adalah sebagai berikut:
+```
+alpha → www.k04.com    (penny) → obladi / desmond  (bergantian)
+alpha → static.k04.com (abbey) → oblada / molly    (bergantian)
+```
+
+Penjelasan singkat istilah yang digunakan:
+- **Reverse proxy**: server perantara yang menerima permintaan dari pengunjung, lalu meneruskannya ke server di belakangnya (backend).
+- **Load balancing**: pembagian permintaan secara bergantian ke beberapa backend agar beban tidak menumpuk di satu server.
+- **Header `Host`**: nama domain yang diakses oleh pengunjung (misalnya `www.k04.com`).
+- **Header `X-Real-IP`**: alamat IP asli pengunjung. Header ini diperlukan karena backend hanya melihat IP milik gerbang (proxy), bukan IP pengunjung.
+
+**Persiapan di Obladi dan Desmond (Backend Vault)**
+
+Agar pembagian beban dapat dibuktikan, setiap node vault diberi file penanda `whoami.txt` yang berisi nama node tersebut. Selain itu, ditambahkan log khusus `header.log` untuk mencatat header `Host` dan `X-Real-IP` yang diterima dari `penny`:
+```bash
+echo "Dilayani oleh: $(hostname)" > /var/www/arsip/whoami.txt
+
+cat <<EOF > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName $(hostname).k04.com
+    DocumentRoot /var/www/arsip
+
+    <Directory /var/www/arsip>
+        Options +Indexes
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog /var/log/apache2/error.log
+    CustomLog /var/log/apache2/access.log combined
+    CustomLog /var/log/apache2/header.log "%t dari=%h Host=%{Host}i X-Real-IP=%{X-Real-IP}i \"%r\""
+</VirtualHost>
+EOF
+
+service apache2 restart
+```
+
+**Persiapan di Oblada dan Molly (Backend Core)**
+
+Pada setiap node core dibuat halaman `headers.php` yang menampilkan nama backend beserta header yang diterimanya. Halaman ini dapat diakses melalui `/headers` berkat aturan rewrite dari soal 10:
+```bash
+cat <<'EOF' > /var/www/html/headers.php
+<?php
+echo "Backend      : " . gethostname() . "\n";
+echo "Host header  : " . ($_SERVER['HTTP_HOST'] ?? '-') . "\n";
+echo "X-Real-IP    : " . ($_SERVER['HTTP_X_REAL_IP'] ?? '-') . "\n";
+echo "REMOTE_ADDR  : " . ($_SERVER['REMOTE_ADDR'] ?? '-') . "\n";
+EOF
+```
+
+**Konfigurasi di Penny (Apache Reverse Proxy → Vault)**
+
+Langkah pertama adalah menginstal Apache pada node `penny`, lalu mengaktifkan modul-modul yang dibutuhkan untuk reverse proxy dan load balancing:
+```bash
+apt update
+apt install apache2 -y
+a2enmod proxy proxy_http proxy_balancer lbmethod_byrequests headers
+mkdir -p /etc/apache2/penny-extra
+```
+
+Kegunaan masing-masing modul:
+- `proxy` dan `proxy_http`: mengaktifkan fitur reverse proxy ke backend HTTP.
+- `proxy_balancer` dan `lbmethod_byrequests`: membagi permintaan secara bergantian ke beberapa backend.
+- `headers`: memungkinkan penambahan header `X-Real-IP`.
+
+Selanjutnya dibuat virtual host `www.k04.com` yang meneruskan permintaan ke `obladi` (`192.213.1.4`) dan `desmond` (`192.213.1.5`):
+```bash
+cat <<'EOF' > /etc/apache2/sites-available/www.conf
+<VirtualHost *:80>
+    ServerName www.k04.com
+
+    # Meneruskan header Host asli dari pengunjung
+    ProxyPreserveHost On
+    # Meneruskan IP asli pengunjung melalui header X-Real-IP
+    RequestHeader set X-Real-IP "expr=%{REMOTE_ADDR}"
+
+    # Daftar backend area vault
+    <Proxy "balancer://vault">
+        BalancerMember "http://192.213.1.4"
+        BalancerMember "http://192.213.1.5"
+    </Proxy>
+
+    # Tempat konfigurasi tambahan untuk soal berikutnya (/admin dan /eternal)
+    IncludeOptional /etc/apache2/penny-extra/*.conf
+
+    ProxyPass        "/" "balancer://vault/"
+    ProxyPassReverse "/" "balancer://vault/"
+
+    ErrorLog  ${APACHE_LOG_DIR}/www_error.log
+    CustomLog ${APACHE_LOG_DIR}/www_access.log combined
+</VirtualHost>
+EOF
+```
+
+Lalu situs default dinonaktifkan, situs `www` diaktifkan, dan Apache direstart:
+```bash
+a2dissite 000-default
+a2ensite www
+apache2ctl configtest && service apache2 restart
+```
+
+**Konfigurasi di Abbey (Nginx Reverse Proxy → Core)**
+
+Pada node `abbey`, Nginx diinstal lalu dibuat konfigurasi `static.k04.com`. Daftar backend didefinisikan pada blok `upstream core_backend` yang berisi `oblada` (`192.213.1.6`) dan `molly` (`192.213.1.7`). Header `Host` dan `X-Real-IP` diteruskan menggunakan `proxy_set_header`:
+```bash
+apt update
+apt install nginx -y
+mkdir -p /etc/nginx/abbey-extra
+
+cat <<'EOF' > /etc/nginx/sites-available/static
+upstream core_backend {
+    zone core_backend 64k;
+    server 192.213.1.6;   # oblada
+    server 192.213.1.7;   # molly
+}
+
+server {
+    listen 80 default_server;
+    server_name static.k04.com;
+
+    # Tempat konfigurasi tambahan untuk soal berikutnya (/orion)
+    include /etc/nginx/abbey-extra/*.conf;
+
+    location / {
+        proxy_pass http://core_backend;
+        proxy_set_header Host            $host;          # meneruskan Host asli
+        proxy_set_header X-Real-IP       $remote_addr;   # meneruskan IP asli pengunjung
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+rm -f /etc/nginx/sites-enabled/default
+ln -sf /etc/nginx/sites-available/static /etc/nginx/sites-enabled/static
+nginx -t && service nginx restart
+```
+
+**Troubleshooting: Round Robin di Abbey Tidak Bergantian**
+
+Pada percobaan awal (tanpa baris `zone`), seluruh permintaan ke `abbey` selalu diteruskan ke `oblada`, padahal `molly` dalam keadaan aktif dan dapat dijangkau. Setelah ditelusuri, penyebabnya adalah Nginx menjalankan beberapa proses pekerja (*worker*), dan setiap worker menghitung giliran round robin secara terpisah yang selalu dimulai dari server pertama. Masalah ini diselesaikan dengan menambahkan baris `zone core_backend 64k;` pada blok `upstream`, sehingga seluruh worker berbagi satu hitungan giliran yang sama.
+
+<!-- Hapus baris gambar di bawah jika tidak ada screenshot troubleshooting -->
+![troubleshoot soal 11](assets/troubleshoot_soal_11.png)
+
+**Validasi**
+
+Untuk membuktikan bahwa kedua gerbang berhasil membagi lalu lintas dan meneruskan identitas pengunjung, dilakukan pengujian dari node klien `alpha` (`192.213.2.2`).
+
+**Cara Validasi:** Mengirimkan empat permintaan berturut-turut ke masing-masing gerbang:
+```bash
+echo "=== penny -> vault ==="
+for i in 1 2 3 4; do curl -s http://www.k04.com/whoami.txt; done
+echo ""
+echo "=== abbey -> core ==="
+for i in 1 2 3 4; do curl -s http://static.k04.com/headers; echo "---"; done
+```
+
+**Hasil yang diharapkan:** Permintaan ke `www.k04.com` dilayani bergantian oleh `obladi` dan `desmond`, sedangkan permintaan ke `static.k04.com` dilayani bergantian oleh `oblada` dan `molly`. Pada area core terlihat `Host header: static.k04.com` dan `X-Real-IP: 192.213.2.2`, sedangkan `REMOTE_ADDR` berisi IP milik `abbey` (`192.213.4.2`). Hal ini mengonfirmasi bahwa:
+- `penny` berhasil mendistribusikan lalu lintas ke area vault secara bergantian.
+- `abbey` berhasil mendistribusikan lalu lintas ke area core secara bergantian.
+- Header `Host` dan IP asli pengunjung (`alpha`) berhasil diteruskan ke backend core.
+
+![langkah 11.5](assets/langkah_11.5.png)
+
+Untuk memastikan `penny` juga meneruskan header ke area vault, dilakukan pengecekan log pada node `obladi`:
+```bash
+tail -n 2 /var/log/apache2/header.log
+```
+
+**Hasil yang diharapkan:** Log mencatat `dari=192.213.5.2 Host=www.k04.com X-Real-IP=192.213.2.2`. Hal ini mengonfirmasi bahwa:
+- Permintaan yang diterima `obladi` berasal dari `penny` (`192.213.5.2`).
+- Header `Host` asli (`www.k04.com`) dan IP asli pengunjung (`192.213.2.2`) berhasil diteruskan oleh `penny` ke area vault.
+
+![langkah 11.6](assets/langkah_11.6.png)

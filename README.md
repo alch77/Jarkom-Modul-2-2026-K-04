@@ -1234,3 +1234,97 @@ tail -n 6 /var/log/nginx/access.log
 - Perbedaan baris log sebelum dan sesudah konfigurasi menjadi bukti langsung keberhasilan perubahan ini.
 
 ![langkah 14.5](assets/langkah_14.5.png)
+
+15. `rootkit` menginstruksikan pembuatan jalur proxy khusus yang berdiri sendiri pada kedua gerbang. Jalur ini tidak diteruskan ke area vault maupun area core, melainkan dilayani langsung oleh gerbang itu sendiri. Pada `penny` dibuat jalur `/eternal` yang menyajikan folder `/var/www/eternal` dan mampu menjalankan (merender) file PHP. Sementara itu, pada `abbey` dibuat jalur `/orion` yang menyajikan folder `/var/www/orion` secara murni statis tanpa pemrosesan PHP.
+
+**Konfigurasi di Penny (Jalur `/eternal` dengan PHP)**
+
+Apache tidak dapat menjalankan PHP secara langsung. Oleh karena itu, pada `penny` diinstal **PHP-FPM** (mesin penjalan PHP), lalu Apache dihubungkan ke PHP-FPM menggunakan modul `proxy_fcgi`. Dengan modul ini, setiap permintaan file `.php` diteruskan oleh Apache ke PHP-FPM untuk dijalankan, dan hasilnya dikembalikan ke pengunjung dalam bentuk HTML. Mekanisme ini juga merupakan bentuk reverse proxy, yaitu Apache sebagai perantara menuju PHP-FPM.
+```bash
+apt install php-fpm -y
+
+PHPFPM=$(ls /etc/init.d | grep -E '^php[0-9.]+-fpm$' | sort -V | tail -n 1)
+a2enmod proxy_fcgi setenvif
+a2enconf $PHPFPM
+```
+Keterangan: variabel `PHPFPM` digunakan untuk mendeteksi nama service PHP-FPM yang terpasang secara otomatis (pada praktikum ini `php8.4-fpm`).
+
+Selanjutnya dibuat halaman `index.php` sederhana yang menampilkan nama host, versi PHP, dan waktu server. Informasi ini hanya dapat muncul apabila kode PHP benar-benar dijalankan:
+```bash
+mkdir -p /var/www/eternal
+cat <<'EOF' > /var/www/eternal/index.php
+<?php
+echo "<h1>Eternal - dirender oleh PHP di " . gethostname() . "</h1>";
+echo "<p>Versi PHP: " . phpversion() . "</p>";
+echo "<p>Waktu server: " . date('Y-m-d H:i:s') . "</p>";
+EOF
+```
+
+Kemudian jalur `/eternal` didaftarkan ke folder `penny-extra` (dimuat otomatis oleh virtual host `www.k04.com` sejak soal 11):
+```bash
+cat <<'EOF' > /etc/apache2/penny-extra/eternal.conf
+ProxyPass /eternal !
+Alias /eternal /var/www/eternal
+
+<Directory /var/www/eternal>
+    DirectoryIndex index.php
+    Require all granted
+</Directory>
+EOF
+
+service $PHPFPM restart
+apache2ctl configtest && service apache2 restart
+```
+
+Penjelasan konfigurasi:
+- `ProxyPass /eternal !`: jalur `/eternal` dikecualikan dari reverse proxy ke area vault, sehingga dilayani langsung oleh `penny`.
+- `Alias /eternal /var/www/eternal`: jalur `/eternal` diarahkan ke folder `/var/www/eternal`.
+- `DirectoryIndex index.php`: file `index.php` menjadi halaman utama ketika folder diakses.
+
+**Konfigurasi di Abbey (Jalur `/orion` Statis)**
+
+Pada `abbey` dibuat folder `/var/www/orion` berisi halaman HTML biasa:
+```bash
+mkdir -p /var/www/orion
+cat <<'EOF' > /var/www/orion/index.html
+<h1>Orion - halaman statis dari abbey</h1>
+<p>Tidak ada PHP di sini.</p>
+EOF
+```
+
+Kemudian ditambahkan blok `location /orion` ke folder `abbey-extra` (dimuat otomatis oleh server `static.k04.com` sejak soal 11). Tidak ada pengaturan PHP pada blok ini, sehingga jalur `/orion` bersifat murni statis:
+```bash
+cat <<'EOF' > /etc/nginx/abbey-extra/orion.conf
+location /orion {
+    alias /var/www/orion;
+    index index.html;
+}
+EOF
+
+nginx -t && service nginx restart
+```
+
+Penjelasan konfigurasi:
+- `location /orion`: menangani seluruh akses ke jalur `/orion`. Karena lebih spesifik daripada `location /`, jalur ini tidak ikut diteruskan ke area core.
+- `alias /var/www/orion`: jalur `/orion` diarahkan ke folder `/var/www/orion`.
+- `index index.html`: file `index.html` menjadi halaman utama ketika folder diakses.
+
+**Validasi**
+
+Untuk membuktikan bahwa kedua jalur berfungsi sesuai ketentuan, dilakukan pengujian dari node klien `alpha` melalui nama kanonik masing-masing gerbang.
+
+**Cara Validasi:**
+```bash
+echo "=== www.k04.com/eternal/ (penny, PHP dirender) ==="
+curl -s http://www.k04.com/eternal/
+echo ""
+echo "=== static.k04.com/orion/ (abbey, statis) ==="
+curl -s http://static.k04.com/orion/
+```
+
+**Hasil yang diharapkan:** Jalur `/eternal/` menampilkan HTML hasil eksekusi PHP berisi nama host `penny`, versi PHP, dan waktu server, bukan teks kode `<?php ... ?>`. Jalur `/orion/` menampilkan halaman HTML statis dari `abbey`. Hal ini mengonfirmasi bahwa:
+- `penny` berhasil menyajikan folder `/var/www/eternal` dan merender file PHP melalui PHP-FPM.
+- `abbey` berhasil menyajikan folder `/var/www/orion` secara murni statis tanpa pemrosesan PHP.
+- Kedua jalur dilayani langsung oleh gerbang masing-masing dan tidak diteruskan ke area vault maupun core.
+
+![langkah 15.3](assets/langkah_15.3.png)

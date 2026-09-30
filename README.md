@@ -996,12 +996,6 @@ ln -sf /etc/nginx/sites-available/static /etc/nginx/sites-enabled/static
 nginx -t && service nginx restart
 ```
 
-**Troubleshooting: Round Robin di Abbey Tidak Bergantian**
-
-Pada percobaan awal (tanpa baris `zone`), seluruh permintaan ke `abbey` selalu diteruskan ke `oblada`, padahal `molly` dalam keadaan aktif dan dapat dijangkau. Setelah ditelusuri, penyebabnya adalah Nginx menjalankan beberapa proses pekerja (*worker*), dan setiap worker menghitung giliran round robin secara terpisah yang selalu dimulai dari server pertama. Masalah ini diselesaikan dengan menambahkan baris `zone core_backend 64k;` pada blok `upstream`, sehingga seluruh worker berbagi satu hitungan giliran yang sama.
-
-<!-- Hapus baris gambar di bawah jika tidak ada screenshot troubleshooting -->
-![troubleshoot soal 11](assets/troubleshoot_soal_11.png)
 
 **Validasi**
 
@@ -1032,4 +1026,4 @@ tail -n 2 /var/log/apache2/header.log
 - Permintaan yang diterima `obladi` berasal dari `penny` (`192.213.5.2`).
 - Header `Host` asli (`www.k04.com`) dan IP asli pengunjung (`192.213.2.2`) berhasil diteruskan oleh `penny` ke area vault.
 
-![langkah 11.6](assets/langkah_11.6.png)
+![langkah 11.6](assets/soal_11_headerlog.png)

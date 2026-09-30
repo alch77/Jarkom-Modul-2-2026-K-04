@@ -1438,5 +1438,101 @@ echo "Serial tedd: $(dig @192.213.1.3 k04.com SOA +short | awk '{print $3}')"
 
 ![langkah 17.2](assets/langkah_17.2.png)
 
+18. Pada tahap ini diuji bagaimana perubahan record DNS menyebar ke klien dengan memperhatikan **TTL (Time To Live)**. TTL adalah lamanya waktu (dalam detik) sebuah jawaban DNS boleh disimpan (*cache*) oleh resolver sebelum resolver wajib bertanya ulang ke server DNS. A record milik `abbey.k04.com` diubah ke alamat IP fiktif `172.30.18.18`, dengan TTL sebesar **15 detik**. Serial SOA pada `prab` dinaikkan agar `tedd` ikut tersinkron. Kemudian diverifikasi tiga fase pencarian:
+1. **Sebelum perubahan**: mengembalikan IP lama (`192.213.4.2`).
+2. **Sesaat setelah perubahan** (dalam jeda 15 detik): masih mengembalikan IP lama karena jawaban tersimpan di cache.
+3. **Setelah TTL habis**: berubah ke IP fiktif yang baru (`172.30.18.18`).
 
+**Mengapa Diperlukan Cache Resolver di Klien**
+
+`prab` dan `tedd` merupakan server DNS *authoritative* (pemilik zona `k04.com`). Server authoritative tidak menyimpan cache untuk zonanya sendiri, sehingga query langsung ke `prab` atau `tedd` akan langsung mendapatkan jawaban terbaru tanpa jeda. Agar efek TTL dan cache dapat diamati, pada `alpha` dipasang **dnsmasq** sebagai *caching resolver* lokal. dnsmasq menyimpan jawaban dari `prab` sesuai nilai TTL-nya, sama seperti resolver pada umumnya.
+```
+alpha  --query-->  dnsmasq (cache, 127.0.0.1)  --query-->  prab (authoritative)
+```
+
+**Tahap 1 - Menetapkan TTL 15 Detik di Prab**
+
+Sebelum IP diubah, TTL record `abbey` terlebih dahulu diatur menjadi 15 detik dengan IP yang masih asli. Hal ini dilakukan agar cache pada klien hanya menyimpan IP lama selama 15 detik (bukan TTL bawaan 604800 detik atau 1 minggu):
+```bash
+bash /root/soal_18.sh ttl
+```
+Perintah tersebut mengubah baris `abbey` pada file zona, menaikkan serial SOA, lalu memuat ulang zona:
+```
+abbey       15      IN      A       192.213.4.2
+```
+
+<!-- Hapus baris gambar di bawah jika tidak ada screenshot -->
+![langkah 18.1](assets/langkah_18.1.png)
+
+**Tahap 2 - Memasang dnsmasq di Alpha**
+
+dnsmasq dipasang di `alpha` dan dijalankan sebagai cache DNS pada `127.0.0.1` yang meneruskan query ke `prab`:
+```bash
+apt install dnsmasq -y
+dnsmasq --no-resolv --no-hosts --server=192.213.1.2 \
+        --listen-address=127.0.0.1 --bind-interfaces --cache-size=1000
+```
+Keterangan: `--server=192.213.1.2` berarti dnsmasq bertanya ke `prab`, sedangkan `--listen-address=127.0.0.1` berarti dnsmasq hanya melayani query dari `alpha` sendiri, sehingga tidak mengganggu konfigurasi DNS utama.
+
+Pengecekan awal menunjukkan TTL yang terus berkurang, yang membuktikan jawaban diambil dari cache:
+```bash
+dig @127.0.0.1 abbey.k04.com +noall +answer   # TTL 15
+sleep 5
+dig @127.0.0.1 abbey.k04.com +noall +answer   # TTL 10
+```
+
+<!-- Hapus baris gambar di bawah jika tidak ada screenshot -->
+![langkah 18.2](assets/langkah_18.2.png)
+
+**Tahap 3 - Mengubah IP dan Memantau Tiga Fase**
+
+Pada `alpha` dijalankan pemantauan setiap 2 detik yang membandingkan jawaban dari cache (`127.0.0.1`) dengan jawaban langsung dari `prab`:
+```bash
+bash /root/soal_18.sh pantau
+```
+
+Saat pemantauan berjalan, pada `prab` dijalankan perubahan IP `abbey` ke IP fiktif, disertai kenaikan serial SOA:
+```bash
+bash /root/soal_18.sh ubah
+```
+```
+abbey       15      IN      A       172.30.18.18
+```
+
+Output pada `prab` menunjukkan serial naik dari `2026092803` menjadi `2026092804`, serta `tedd` telah tersinkron dengan serial dan jawaban yang sama:
+
+![langkah 18.4](assets/langkah_18.4.png)
+
+**Validasi**
+
+Hasil pemantauan dari `alpha` memperlihatkan tiga fase dengan jelas:
+
+| Waktu | Jawaban via cache (alpha) | Jawaban langsung ke prab | Fase |
+| :---: | :---: | :---: | :--- |
+| 21:28:02 – 21:28:20 | `192.213.4.2` | `192.213.4.2` | 1 - Sebelum perubahan |
+| 21:28:22 – 21:28:31 | `192.213.4.2` (TTL 11 → 2) | `172.30.18.18` | 2 - Perubahan baru terjadi, cache masih menyimpan IP lama |
+| 21:28:33 – seterusnya | `172.30.18.18` | `172.30.18.18` | 3 - TTL habis, cache mengambil IP baru |
+
+![langkah 18.3](assets/langkah_18.3.png)
+
+**Hasil yang diharapkan:** Terlihat tiga fase pencarian sesuai ketentuan. Hal ini mengonfirmasi bahwa:
+- Sebelum perubahan, seluruh query mengembalikan IP lama `192.213.4.2`.
+- Sesaat setelah perubahan, `prab` sudah menjawab IP fiktif `172.30.18.18`, tetapi klien yang bertanya melalui cache masih menerima IP lama hingga sisa TTL habis.
+- Setelah TTL 15 detik habis, cache mengambil jawaban baru dari `prab` sehingga klien menerima IP fiktif `172.30.18.18`.
+- Serial SOA `prab` dan `tedd` bernilai sama, menandakan zone transfer berjalan setelah perubahan.
+
+**Pemulihan Konfigurasi**
+
+Sesuai ketentuan soal 20, konfigurasi nomor 18 dikembalikan ke kondisi normal. Record `abbey` dikembalikan ke IP asli dengan TTL bawaan, dan dnsmasq pada `alpha` dihentikan:
+```bash
+# di prab
+bash /root/soal_18.sh kembali
+
+# di alpha
+pkill dnsmasq
+dig abbey.k04.com +short   # 192.213.4.2
+```
+
+<!-- Hapus baris gambar di bawah jika tidak ada screenshot -->
+![langkah 18.5](assets/langkah_18.5.png)
 

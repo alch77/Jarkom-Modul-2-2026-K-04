@@ -1536,3 +1536,59 @@ dig abbey.k04.com +short   # 192.213.4.2
 <!-- Hapus baris gambar di bawah jika tidak ada screenshot -->
 ![langkah 18.5](assets/langkah_18.5.png)
 
+19. Pada tahap ini dibuat sebuah CNAME record yang menghubungkan domain internal `outbound.k04.com` ke domain eksternal di internet, yaitu `http.badssl.com`. **CNAME (Canonical Name)** adalah record DNS yang berfungsi sebagai alias, yang menyatakan bahwa sebuah nama merupakan nama lain dari domain tujuan. Dengan demikian, ketika klien mengakses `outbound.k04.com`, DNS akan mengarahkannya ke alamat IP milik `http.badssl.com`.
+
+Alur resolusi yang terjadi adalah sebagai berikut:
+```
+alpha -> prab: "outbound.k04.com?"
+prab  -> "CNAME http.badssl.com." -> prab bertanya ke forwarder (192.168.122.1) -> IP publik badssl
+alpha -> terhubung ke IP publik badssl melalui NAT di rootkit
+```
+
+**Konfigurasi di Prab (DNS Master)**
+
+CNAME record ditambahkan ke file zona `k04.com`, kemudian serial SOA dinaikkan dan BIND9 direstart:
+```bash
+ZONE_FILE=/etc/bind/k04/k04.com
+
+grep -q "^outbound" "$ZONE_FILE" || \
+    echo "outbound    IN      CNAME   http.badssl.com." >> "$ZONE_FILE"
+
+OLD=$(grep -m1 -oE '[0-9]{10}' "$ZONE_FILE")
+NEW=$((OLD + 1))
+sed -i "s/$OLD/$NEW/" "$ZONE_FILE"
+
+named-checkzone k04.com "$ZONE_FILE" && service bind9 restart
+```
+Keterangan: tanda titik (`.`) di akhir `http.badssl.com.` wajib ditulis. Tanda ini menandakan nama domain absolut. Tanpa titik, BIND9 akan menganggapnya sebagai nama di dalam zona sendiri sehingga menjadi `http.badssl.com.k04.com`.
+
+<!-- Hapus baris gambar di bawah jika tidak ada screenshot -->
+![langkah 19.1](assets/langkah_19.1.png)
+
+**Validasi**
+
+Pengujian dilakukan dari node klien `alpha`. Pertama, diperiksa hasil resolusi DNS untuk `outbound.k04.com`, kemudian dilakukan perintah `curl` untuk membandingkan isi halaman dengan `http.badssl.com`.
+
+**Cara Validasi:**
+```bash
+dig outbound.k04.com +noall +answer
+curl -s http://outbound.k04.com | head -n 8
+curl -sv -H "Host: http.badssl.com" http://outbound.k04.com 2>&1 | grep -E "Connected to|> Host:"
+curl -s -H "Host: http.badssl.com" http://outbound.k04.com | head -n 15
+if [ "$(curl -s -H 'Host: http.badssl.com' http://outbound.k04.com | md5sum)" = "$(curl -s http://http.badssl.com | md5sum)" ]; then echo "ISI SAMA"; else echo "ISI BERBEDA"; fi
+```
+
+**Catatan tentang Header Host**
+
+Server `badssl.com` melayani banyak situs sekaligus dalam satu alamat IP (*virtual hosting*) dan menentukan situs mana yang ditampilkan berdasarkan header `Host` yang dikirim oleh klien, sama seperti mekanisme yang digunakan `penny` dan `abbey` pada soal 13. Saat menjalankan `curl http://outbound.k04.com`, resolusi DNS melalui CNAME sudah berhasil mengarahkan koneksi ke server badssl, tetapi `curl` mengirimkan `Host: outbound.k04.com`. Karena server badssl tidak mengenal nama tersebut, halaman yang dikembalikan bukan halaman `http.badssl.com`. Oleh karena itu, akses tetap dilakukan melalui `outbound.k04.com` (sehingga resolusi DNS tetap menggunakan CNAME), namun header `Host` disesuaikan menjadi `http.badssl.com`.
+
+**Hasil yang diharapkan:** Query DNS menunjukkan `outbound.k04.com` merupakan CNAME dari `http.badssl.com` yang berujung pada alamat IP publik badssl. Output `curl -v` menunjukkan koneksi dibuat ke `outbound.k04.com` dengan header `Host: http.badssl.com`, dan isi halaman yang dikembalikan identik dengan `http.badssl.com` (`ISI SAMA`). Hal ini mengonfirmasi bahwa:
+- CNAME record `outbound.k04.com` berhasil mengarahkan resolusi nama ke domain eksternal `http.badssl.com`.
+- `prab` berhasil meneruskan query domain eksternal ke forwarder untuk mendapatkan alamat IP publik.
+- Klien internal dapat menjangkau server eksternal melalui domain internal berkat resolusi CNAME dan NAT pada `rootkit`.
+- Isi halaman yang diakses melalui `outbound.k04.com` sama persis dengan isi halaman `http.badssl.com`.
+
+![langkah 19.2](assets/langkah_19.2.png)
+
+
+

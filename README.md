@@ -1588,7 +1588,8 @@ Server `badssl.com` melayani banyak situs sekaligus dalam satu alamat IP (*virtu
 - Klien internal dapat menjangkau server eksternal melalui domain internal berkat resolusi CNAME dan NAT pada `rootkit`.
 - Isi halaman yang diakses melalui `outbound.k04.com` sama persis dengan isi halaman `http.badssl.com`.
 
-![langkah 19.2](assets/langkah_19.2.png)
+[langkah 19.2a](assets/langkah_19.2a.png)
+[langkah 19.2b](assets/langkah_19.2b.png)
 
 
 
